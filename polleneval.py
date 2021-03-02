@@ -4,34 +4,26 @@
     Licensed under The MIT License [see LICENSE for details]
 """
 
-from __future__ import print_function
-
 import argparse
 import os
 import pickle
-import sys
 import time
+from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-import torch.nn as nn
-import torch.utils.data as data
+from torch.autograd import Variable
 
 from data import (
-    VOC_CLASSES as labelmap,
-    VOC_ROOT,
+    POLLEN_CLASSES as labelmap,
+    POLLEN_ROOT,
+    POLLENDetection,
     VOCAnnotationTransform,
-    VOCDetection,
+    pollen,
 )
-from ssd import build_ssd
+from nvidia_ssd import build_ssd
 from utils import BaseTransform
-
-if sys.version_info[0] == 2:
-    import xml.etree.cElementTree as ET
-else:
-    import xml.etree.ElementTree as ET
 
 
 def str2bool(v):
@@ -64,7 +56,7 @@ parser.add_argument(
     '--cuda', default=True, type=str2bool, help='Use cuda to train model'
 )
 parser.add_argument(
-    '--voc_root', default=VOC_ROOT, help='Location of VOC root directory'
+    '--dataset_root', default=POLLEN_ROOT, help='Location of VOC root directory'
 )
 parser.add_argument(
     '--cleanup',
@@ -90,11 +82,13 @@ if torch.cuda.is_available():
 else:
     torch.set_default_tensor_type('torch.FloatTensor')
 
-annopath = os.path.join(args.voc_root, 'VOC2007', 'Annotations', '%s.xml')
-imgpath = os.path.join(args.voc_root, 'VOC2007', 'JPEGImages', '%s.jpg')
-imgsetpath = os.path.join(args.voc_root, 'VOC2007', 'ImageSets', 'Main', '{:s}.txt')
-YEAR = '2007'
-devkit_path = args.voc_root + 'VOC' + YEAR
+annopath = Path(
+    os.path.join(args.dataset_root, 'POLLEN2019', 'Annotations', 'test.pkl')
+)
+
+YEAR = '2019'
+devkit_path = args.dataset_root + 'POLLEN' + YEAR
+dataset_mean = (104, 117, 123)
 set_type = 'test'
 
 
@@ -124,28 +118,6 @@ class Timer(object):
             return self.diff
 
 
-def parse_rec(filename):
-    """ Parse a PASCAL VOC xml file """
-    tree = ET.parse(filename)
-    objects = []
-    for obj in tree.findall('object'):
-        obj_struct = {}
-        obj_struct['name'] = obj.find('name').text
-        obj_struct['pose'] = obj.find('pose').text
-        obj_struct['truncated'] = int(obj.find('truncated').text)
-        obj_struct['difficult'] = int(obj.find('difficult').text)
-        bbox = obj.find('bndbox')
-        obj_struct['bbox'] = [
-            int(bbox.find('xmin').text) - 1,
-            int(bbox.find('ymin').text) - 1,
-            int(bbox.find('xmax').text) - 1,
-            int(bbox.find('ymax').text) - 1,
-        ]
-        objects.append(obj_struct)
-
-    return objects
-
-
 def get_output_dir(name, phase):
     """Return the directory where experimental artifacts are placed.
     If the directory does not exist, it is created.
@@ -170,33 +142,27 @@ def get_voc_results_file_template(image_set, cls):
 
 def write_voc_results_file(all_boxes, dataset):
     for cls_ind, cls in enumerate(labelmap):
-        print('Writing {:s} VOC results file'.format(cls))
+        print(f'Writing {cls:s} VOC results file')
         filename = get_voc_results_file_template(set_type, cls)
         with open(filename, 'wt') as f:
             for im_ind, index in enumerate(dataset.ids):
                 dets = all_boxes[cls_ind + 1][im_ind]
-                if dets == []:
+                if dets.size == 0:
                     continue
                 # the VOCdevkit expects 1-based indices
                 for k in range(dets.shape[0]):
                     f.write(
-                        '{:s} {:.3f} {:.1f} {:.1f} {:.1f} {:.1f}\n'.format(
-                            index[1],
-                            dets[k, -1],
-                            dets[k, 0] + 1,
-                            dets[k, 1] + 1,
-                            dets[k, 2] + 1,
-                            dets[k, 3] + 1,
-                        )
+                        f'{index[1]:s} {dets[k, -1]:.3f} '
+                        f'{dets[k, 0] + 1:.1f} {dets[k, 1] + 1:.1f} '
+                        f'{dets[k, 2] + 1:.1f} {dets[k, 3] + 1:.1f}\n'
                     )
 
 
 def do_python_eval(output_dir='output', use_07=True):
-    cachedir = os.path.join(devkit_path, 'annotations_cache')
     aps = []
     # The PASCAL VOC metric changed in 2010
-    use_07_metric = use_07
-    print('VOC07 metric? ' + ('Yes' if use_07_metric else 'No'))
+
+    print('VOC07 metric? ' + ('Yes' if use_07 else 'No'))
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
     for i, cls in enumerate(labelmap):
@@ -204,22 +170,20 @@ def do_python_eval(output_dir='output', use_07=True):
         rec, prec, ap = voc_eval(
             filename,
             annopath,
-            imgsetpath.format(set_type),
-            cls,
-            cachedir,
+            i,
             ovthresh=0.5,
-            use_07_metric=use_07_metric,
+            use_07_metric=use_07,
         )
         aps += [ap]
-        print('AP for {} = {:.4f}'.format(cls, ap))
-        with open(os.path.join(output_dir, cls + '_pr.pkl'), 'wb') as f:
+        print(f'AP for {cls} = {ap:.4f}')
+        with open(os.path.join(output_dir, f'{cls}_pr.pkl'), 'wb') as f:
             pickle.dump({'rec': rec, 'prec': prec, 'ap': ap}, f)
-    print('Mean AP = {:.4f}'.format(np.mean(aps)))
+    print(f'Mean AP = {np.mean(aps):.4f}')
     print('~~~~~~~~')
     print('Results:')
     for ap in aps:
-        print('{:.3f}'.format(ap))
-    print('{:.3f}'.format(np.mean(aps)))
+        print(f'{ap:.3f}')
+    print(f'{np.mean(aps):.3f}')
     print('~~~~~~~~')
     print('')
     print('--------------------------------------------------------------')
@@ -265,65 +229,38 @@ def voc_ap(rec, prec, use_07_metric=True):
 def voc_eval(
     detpath,
     annopath,
-    imagesetfile,
     classname,
-    cachedir,
     ovthresh=0.5,
     use_07_metric=True,
 ):
     """rec, prec, ap = voc_eval(detpath,
                                annopath,
-                               imagesetfile,
                                classname,
                                [ovthresh],
                                [use_07_metric])
     Top level function that does the PASCAL VOC evaluation.
     detpath: Path to detections
        detpath.format(classname) should produce the detection results file.
-    annopath: Path to annotations
-       annopath.format(imagename) should be the xml annotations file.
-    imagesetfile: Text file containing the list of images, one image per line.
+    annopath: Path to annotations pickle file.
     classname: Category name (duh)
-    cachedir: Directory for caching the annotations
     [ovthresh]: Overlap threshold (default = 0.5)
     [use_07_metric]: Whether to use VOC07's 11 point AP computation
        (default True)"""
     # assumes detections are in detpath.format(classname)
-    # assumes annotations are in annopath.format(imagename)
-    # assumes imagesetfile is a text file with each line an image name
-    # cachedir caches the annotations in a pickle file
     # first load gt
-    if not os.path.isdir(cachedir):
-        os.mkdir(cachedir)
-    cachefile = os.path.join(cachedir, 'annots.pkl')
-    # read list of images
-    with open(imagesetfile, 'r') as f:
-        lines = f.readlines()
-    imagenames = [x.strip() for x in lines]
-    if not os.path.isfile(cachefile):
-        # load annots
-        recs = {}
-        for i, imagename in enumerate(imagenames):
-            recs[imagename] = parse_rec(annopath % (imagename))
-            if i % 100 == 0:
-                print('Reading annotation for {:d}/{:d}'.format(i + 1, len(imagenames)))
-        # save
-        print('Saving cached annotations to {:s}'.format(cachefile))
-        with open(cachefile, 'wb') as f:
-            pickle.dump(recs, f)
-    else:
-        # load
-        with open(cachefile, 'rb') as f:
-            recs = pickle.load(f)
+    recs = pickle.load(annopath.open('rb'))
+
+    imagenames = list(recs.keys())
 
     # extract gt objects for this class
     class_recs = {}
     npos = 0
     for imagename in imagenames:
-        R = [obj for obj in recs[imagename] if obj['name'] == classname]
-        bbox = np.array([x['bbox'] for x in R])
-        difficult = np.array([x['difficult'] for x in R]).astype(np.bool)
-        det = [False] * len(R)
+        bbox = np.array(
+            [obj[:4] for obj in recs[imagename] if int(obj[4]) == classname]
+        )
+        difficult = np.zeros(bbox.shape[0]).astype(bool)
+        det = [False] * len(bbox)
         npos = npos + sum(~difficult)
         class_recs[imagename] = {'bbox': bbox, 'difficult': difficult, 'det': det}
 
@@ -340,7 +277,7 @@ def voc_eval(
 
         # sort by confidence
         sorted_ind = np.argsort(-confidence)
-        _ = np.sort(-confidence)
+
         BB = BB[sorted_ind, :]
         image_ids = [image_ids[x] for x in sorted_ind]
 
@@ -407,13 +344,13 @@ def test_net(save_folder, net, cuda, dataset, top_k, im_size=300, thresh=0.05):
 
     # timers
     _t = {'im_detect': Timer(), 'misc': Timer()}
-    output_dir = get_output_dir('ssd300_120000', set_type)
+    output_dir = get_output_dir('ssd300_pollen', set_type)
     det_file = os.path.join(output_dir, 'detections.pkl')
 
     for i in range(num_images):
         im, gt, h, w = dataset.pull_item(i)
 
-        x = im.unsqueeze(0)
+        x = Variable(im.unsqueeze(0))
         if args.cuda:
             x = x.cuda()
         _t['im_detect'].tic()
@@ -439,7 +376,7 @@ def test_net(save_folder, net, cuda, dataset, top_k, im_size=300, thresh=0.05):
             )
             all_boxes[j][i] = cls_dets
 
-        print('im_detect: {:d}/{:d} {:.3f}s'.format(i + 1, num_images, detect_time))
+        print(f'im_detect: {i+1:d}/{num_images:d} {detect_time:.3f}s')
 
     with open(det_file, 'wb') as f:
         pickle.dump(all_boxes, f, pickle.HIGHEST_PROTOCOL)
@@ -455,17 +392,17 @@ def evaluate_detections(box_list, output_dir, dataset):
 
 if __name__ == '__main__':
     # load net
+    cfg = pollen
     num_classes = len(labelmap) + 1  # +1 for background
-    net = build_ssd('test', 300, num_classes)  # initialize SSD
+    net = build_ssd('test', pollen)  # initialize SSD
     net.load_state_dict(torch.load(args.trained_model))
     net.eval()
     print('Finished loading model!')
     # load data
-    dataset = VOCDetection(
-        args.voc_root,
-        [('2007', set_type)],
+    dataset = POLLENDetection(
+        args.dataset_root,
+        [('2019', set_type)],
         BaseTransform(net.size),
-        VOCAnnotationTransform(),
     )
     if args.cuda:
         net = net.cuda()
@@ -477,6 +414,6 @@ if __name__ == '__main__':
         args.cuda,
         dataset,
         args.top_k,
-        net.size,
+        300,
         thresh=args.confidence_threshold,
     )

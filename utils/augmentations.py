@@ -1,9 +1,11 @@
-import torch
-from torchvision import transforms
+import types
+from random import choice
+
 import cv2
 import numpy as np
-import types
+import torch
 from numpy import random
+from torchvision import transforms
 
 
 def intersect(box_a, box_b):
@@ -25,10 +27,8 @@ def jaccard_numpy(box_a, box_b):
         jaccard overlap: Shape: [box_a.shape[0], box_a.shape[1]]
     """
     inter = intersect(box_a, box_b)
-    area_a = ((box_a[:, 2]-box_a[:, 0]) *
-              (box_a[:, 3]-box_a[:, 1]))  # [A,B]
-    area_b = ((box_b[2]-box_b[0]) *
-              (box_b[3]-box_b[1]))  # [A,B]
+    area_a = (box_a[:, 2] - box_a[:, 0]) * (box_a[:, 3] - box_a[:, 1])  # [A,B]
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])  # [A,B]
     union = area_a + area_b - inter
     return inter / union  # [A,B]
 
@@ -44,8 +44,8 @@ class Compose(object):
         >>> ])
     """
 
-    def __init__(self, transforms):
-        self.transforms = transforms
+    def __init__(self, transf):
+        self.transforms = transf
 
     def __call__(self, img, boxes=None, labels=None):
         for t in self.transforms:
@@ -106,8 +106,7 @@ class Resize(object):
         self.size = size
 
     def __call__(self, image, boxes=None, labels=None):
-        image = cv2.resize(image, (self.size,
-                                 self.size))
+        image = cv2.resize(image, (self.size, self.size))
         return image, boxes, labels
 
 
@@ -140,9 +139,7 @@ class RandomHue(object):
 
 class RandomLightingNoise(object):
     def __init__(self):
-        self.perms = ((0, 1, 2), (0, 2, 1),
-                      (1, 0, 2), (1, 2, 0),
-                      (2, 0, 1), (2, 1, 0))
+        self.perms = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
 
     def __call__(self, image, boxes=None, labels=None):
         if random.randint(2):
@@ -159,9 +156,9 @@ class ConvertColor(object):
 
     def __call__(self, image, boxes=None, labels=None):
         if self.current == 'BGR' and self.transform == 'HSV':
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            image = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         elif self.current == 'HSV' and self.transform == 'BGR':
-            image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
+            image = cv2.cvtColor(image, cv2.COLOR_HSV2RGB)
         else:
             raise NotImplementedError
         return image, boxes, labels
@@ -197,12 +194,11 @@ class RandomBrightness(object):
 
 class ToCV2Image(object):
     def __call__(self, tensor, boxes=None, labels=None):
-        return tensor.cpu().numpy().astype(np.float32).transpose((1, 2, 0)), boxes, labels
-
-
-class ToTensor(object):
-    def __call__(self, cvimage, boxes=None, labels=None):
-        return torch.from_numpy(cvimage.astype(np.float32)).permute(2, 0, 1), boxes, labels
+        return (
+            tensor.cpu().numpy().astype(np.float32).transpose((1, 2, 0)),
+            boxes,
+            labels,
+        )
 
 
 class RandomSampleCrop(object):
@@ -218,6 +214,7 @@ class RandomSampleCrop(object):
             boxes (Tensor): the adjusted bounding boxes in pt form
             labels (Tensor): the class labels for each bbox
     """
+
     def __init__(self):
         self.sample_options = (
             # using entire original input image
@@ -235,7 +232,7 @@ class RandomSampleCrop(object):
         height, width, _ = image.shape
         while True:
             # randomly choose a mode
-            mode = random.choice(self.sample_options)
+            mode = choice(self.sample_options)
             if mode is None:
                 return image, boxes, labels
 
@@ -260,7 +257,7 @@ class RandomSampleCrop(object):
                 top = random.uniform(height - h)
 
                 # convert to integer rect x1,y1,x2,y2
-                rect = np.array([int(left), int(top), int(left+w), int(top+h)])
+                rect = np.array([int(left), int(top), int(left + w), int(top + h)])
 
                 # calculate IoU (jaccard overlap) b/t the cropped and gt boxes
                 overlap = jaccard_numpy(boxes, rect)
@@ -270,8 +267,7 @@ class RandomSampleCrop(object):
                     continue
 
                 # cut the crop from the image
-                current_image = current_image[rect[1]:rect[3], rect[0]:rect[2],
-                                              :]
+                current_image = current_image[rect[1] : rect[3], rect[0] : rect[2], :]
 
                 # keep overlap with gt box IF center in sampled patch
                 centers = (boxes[:, :2] + boxes[:, 2:]) / 2.0
@@ -296,13 +292,11 @@ class RandomSampleCrop(object):
                 current_labels = labels[mask]
 
                 # should we use the box left and top corner or the crop's
-                current_boxes[:, :2] = np.maximum(current_boxes[:, :2],
-                                                  rect[:2])
+                current_boxes[:, :2] = np.maximum(current_boxes[:, :2], rect[:2])
                 # adjust to crop (by substracting crop's left,top)
                 current_boxes[:, :2] -= rect[:2]
 
-                current_boxes[:, 2:] = np.minimum(current_boxes[:, 2:],
-                                                  rect[2:])
+                current_boxes[:, 2:] = np.minimum(current_boxes[:, 2:], rect[2:])
                 # adjust to crop (by substracting crop's left,top)
                 current_boxes[:, 2:] -= rect[:2]
 
@@ -319,15 +313,16 @@ class Expand(object):
 
         height, width, depth = image.shape
         ratio = random.uniform(1, 4)
-        left = random.uniform(0, width*ratio - width)
-        top = random.uniform(0, height*ratio - height)
+        left = random.uniform(0, width * ratio - width)
+        top = random.uniform(0, height * ratio - height)
 
         expand_image = np.zeros(
-            (int(height*ratio), int(width*ratio), depth),
-            dtype=image.dtype)
+            (int(height * ratio), int(width * ratio), depth), dtype=image.dtype
+        )
         expand_image[:, :, :] = self.mean
-        expand_image[int(top):int(top + height),
-                     int(left):int(left + width)] = image
+        expand_image[
+            int(top) : int(top + height), int(left) : int(left + width)
+        ] = image
         image = expand_image
 
         boxes = boxes.copy()
@@ -381,7 +376,7 @@ class PhotometricDistort(object):
             RandomSaturation(),
             RandomHue(),
             ConvertColor(current='HSV', transform='BGR'),
-            RandomContrast()
+            RandomContrast(),
         ]
         self.rand_brightness = RandomBrightness()
         self.rand_light_noise = RandomLightingNoise()
@@ -397,21 +392,53 @@ class PhotometricDistort(object):
         return self.rand_light_noise(im, boxes, labels)
 
 
-class SSDAugmentation(object):
+class ToTensor:
+    def __call__(self, image, boxes, labels):
+        im = transforms.functional.to_tensor(image)
+        return im, boxes, labels
+
+
+class Normalize:
+    def __call__(self, image, boxes, labels):
+        im = transforms.functional.normalize(
+            image, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
+        return im, boxes, labels
+
+
+class SSDAugmentation:
     def __init__(self, size=300, mean=(104, 117, 123)):
         self.mean = mean
         self.size = size
-        self.augment = Compose([
-            ConvertFromInts(),
-            ToAbsoluteCoords(),
-            PhotometricDistort(),
-            Expand(self.mean),
-            RandomSampleCrop(),
-            RandomMirror(),
-            ToPercentCoords(),
-            Resize(self.size),
-            SubtractMeans(self.mean)
-        ])
+        self.augment = Compose(
+            [
+                ConvertFromInts(),
+                ToAbsoluteCoords(),
+                PhotometricDistort(),
+                Expand(self.mean),
+                RandomSampleCrop(),
+                RandomMirror(),
+                ToPercentCoords(),
+                Resize(self.size),
+                ToTensor(),
+                Normalize(),
+            ]
+        )
+
+    def __call__(self, img, boxes, labels):
+        return self.augment(img, boxes, labels)
+
+
+class BaseTransform:
+    def __init__(self, size=300):
+        self.size = size
+        self.augment = Compose(
+            [
+                Resize(self.size),
+                ToTensor(),
+                Normalize(),
+            ]
+        )
 
     def __call__(self, img, boxes, labels):
         return self.augment(img, boxes, labels)
